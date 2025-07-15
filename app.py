@@ -221,13 +221,16 @@ def previoust_step(data=None):
     elif step > 1:
         step -= 1
 
-        socket.emit(
-            "previoust_step_info",
-            {
-                "success": True,
-                "steps": f"{step}/{steps_number}",
-            },
-        )
+        for track in tracks:
+            if track["name"] == track_name:
+                socket.emit(
+                    "previoust_step_info",
+                    {
+                        "success": True,
+                        "steps": f"{step}/{steps_number}",
+                        "combination": track["combination"][str(step)],
+                    },
+                )
     else:
         socket.emit(
             "previoust_step_info",
