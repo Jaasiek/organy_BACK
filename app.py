@@ -1,11 +1,15 @@
 from flask import Flask
 from flask_socketio import SocketIO
 from flask_cors import CORS
+import threading
 import json, time
+from gpio import update_cords_divisions, run
+
 
 app = Flask(__name__)
 CORS(app)
 socket = SocketIO(app, cors_allowed_origins="*")
+
 
 global track_name, step, steps_number, tracks, combination
 step = 0
@@ -150,13 +154,16 @@ def start_playing():
 
     for track in tracks:
         if track["name"] == track_name:
+            combination = track["combination"][str(step)]
+            update_cords_divisions(combination)
+
             socket.emit(
                 "play",
                 {
                     "success": True,
                     "title": track_name,
                     "steps": f"{step}/{steps_number}",
-                    "combination": track["combination"][str(step)],
+                    "combination": combination,
                 },
             )
 
@@ -171,12 +178,14 @@ def next_step():
 
         for track in tracks:
             if track["name"] == track_name:
+                combination = track["combination"][str(step)]
+                update_cords_divisions(combination)
                 socket.emit(
                     "next_step_info",
                     {
                         "success": True,
                         "steps": f"{step}/{steps_number}",
-                        "combination": track["combination"][str(step)],
+                        "combination": combination,
                     },
                 )
     else:
@@ -199,13 +208,13 @@ def previoust_step(data=None):
             step -= 1
             for track in tracks:
                 if track["name"] == data["track_name"]:
+                    combination = track["combination"][str(data["step_to_edit"])]
+                    update_cords_divisions(combination)
                     socket.emit(
                         "previoust_step_info",
                         {
                             "success": True,
-                            "combination": track["combination"][
-                                str(data["step_to_edit"])
-                            ],
+                            "combination": combination,
                         },
                     )
         except:
@@ -223,12 +232,14 @@ def previoust_step(data=None):
 
         for track in tracks:
             if track["name"] == track_name:
+                combination = track["combination"][str(step)]
+                update_cords_divisions(combination)
                 socket.emit(
-                    "previoust_step_info",
+                    "next_step_info",
                     {
                         "success": True,
                         "steps": f"{step}/{steps_number}",
-                        "combination": track["combination"][str(step)],
+                        "combination": combination,
                     },
                 )
     else:
@@ -372,4 +383,8 @@ def confirm_track(data):
 
 
 if __name__ == "__main__":
-    socket.run(app, host="0.0.0.0", port=2137, debug=True)
+    uart_thread = threading.Thread(target=run, args=(socket,))
+    uart_thread.daemon = True  # zakończy się wraz z aplikacją
+    uart_thread.start()
+
+    socket.run(app, host="0.0.0.0", port=2137, debug=False, use_reloader=False)
