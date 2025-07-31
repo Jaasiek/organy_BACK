@@ -3,6 +3,7 @@ from flask_socketio import SocketIO
 from flask_cors import CORS
 import threading
 import json, time
+
 from gpio import update_cords_divisions, run
 
 
@@ -384,7 +385,8 @@ def confirm_track(data):
 
 if __name__ == "__main__":
     uart_thread = threading.Thread(target=run, args=(socket,))
-    uart_thread.daemon = True  # zakończy się wraz z aplikacją
-    uart_thread.start()
+    uart_thread.daemon = True
+    uart_thread.start
 
     socket.run(app, host="0.0.0.0", port=2137, debug=False, use_reloader=False)
+    # socket.run(app, host="0.0.0.0", port=2137, debug=True)

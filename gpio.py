@@ -2,7 +2,6 @@ import pigpio
 import serial
 import time
 
-# --- GPIO konfiguracja ---
 SER_1 = 17
 SRCLK = 27
 RCLK = 22
@@ -31,9 +30,6 @@ cords = {str(i): 0 for i in range(1, 33)}
 
 position = 0
 last_encoded = (pi.read(ENC_CLK) << 1) | pi.read(ENC_DT)
-
-
-# --- Funkcje ---
 
 
 def shift_out(bit_list, pinout):
