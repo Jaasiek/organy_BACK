@@ -1,74 +1,58 @@
-# zapal wszystkie nuty w manual_1, reszta zera
 import pigpio
 import time
 
-# Nowy wspólny SER
-SER = 17
-SRCLK = 27
-RCLK = 22
-ENC_CLK = 5
-ENC_DT = 6
-
-# Liczba rejestrów
-REG_MANUAL = 7
-REG_PEDAL = 4
-
-NUM_MANUAL_KEYS = REG_MANUAL * 8  # 56
-NUM_PEDAL_KEYS = REG_PEDAL * 8  # 32
-NUM_TOTAL_KEYS = NUM_MANUAL_KEYS + NUM_PEDAL_KEYS  # 88
+# ======= WEJŚCIA 4x 74HC165 =======
+PIN_165_PL = 19  # SH/LD (aktywny niski)
+PIN_165_CP = 26  # CLK
+PIN_165_Q7 = 13  # DATA z łańcucha do RPi
+NUM_165 = 4  # liczba układów w łańcuchu
+ACTIVE_LOW_165 = True  # jeśli wejścia zwierają do GND
 
 pi = pigpio.pi()
 if not pi.connected:
     print("Nie można połączyć z pigpiod.")
     exit(1)
 
-# Ustawienie pinów
-for pin in [SER, SRCLK, RCLK]:
-    pi.set_mode(pin, pigpio.OUTPUT)
-    pi.write(pin, 0)
+# ustawienie pinów
+pi.set_mode(PIN_165_PL, pigpio.OUTPUT)
+pi.set_mode(PIN_165_CP, pigpio.OUTPUT)
+pi.set_mode(PIN_165_Q7, pigpio.INPUT)
+pi.set_pull_up_down(PIN_165_Q7, pigpio.PUD_UP)
 
-pi.set_mode(ENC_CLK, pigpio.INPUT)
-pi.set_pull_up_down(ENC_CLK, pigpio.PUD_UP)
-pi.set_mode(ENC_DT, pigpio.INPUT)
-pi.set_pull_up_down(ENC_DT, pigpio.PUD_UP)
-
-
-def shift_out_all(*segments):
-    """Przesyła dowolne segmenty bitów do łańcucha rejestrów"""
-    all_bits = []
-    for seg in segments:
-        all_bits.extend(seg)
-
-    if len(all_bits) != 88:
-        raise ValueError(f"Oczekiwano 88 bitów, otrzymano {len(all_bits)}")
-
-    bits = list(reversed(all_bits))  # Pierwszy bit na końcu rejestru
-
-    for bit in bits:
-        pi.write(SER, bit)
-        pi.write(SRCLK, 1)
-        pi.write(SRCLK, 0)
-
-    pi.write(RCLK, 1)
-    pi.write(RCLK, 0)
+pi.write(PIN_165_PL, 1)
+pi.write(PIN_165_CP, 0)
 
 
-def reset():
-    keys_manual_1 = [0] * NUM_MANUAL_KEYS
-    keys_pedal = [0] * NUM_PEDAL_KEYS
-    all_keys = keys_manual_1 + keys_pedal
-    shift_out_all(all_keys)
+def read_165_bits(num_chips=NUM_165):
+    total_bits = num_chips * 8
+
+    # załaduj równolegle dane z wejść
+    pi.write(PIN_165_PL, 0)
+    time.sleep(0.000001)
+    pi.write(PIN_165_PL, 1)
+
+    bits = []
+    for _ in range(total_bits):
+        bit = pi.read(PIN_165_Q7)
+        if ACTIVE_LOW_165:
+            bit = 1 - bit
+        bits.append(bit)
+        pi.write(PIN_165_CP, 1)
+        pi.write(PIN_165_CP, 0)
+
+    return bits
 
 
-while True:
-    # zapalamy tylko manual_1, reszta zera
-    keys_manual_1 = [1] * NUM_MANUAL_KEYS
-    keys_pedal = [0] * NUM_PEDAL_KEYS
-    all_keys = keys_manual_1 + keys_pedal
-    reset()
-    print("OFF")
-    time.sleep(2)
+print("Start testu — naciskaj przyciski podpięte do 74HC165...")
+last_bits = None
 
-    shift_out_all(all_keys)
-    print("ON")
-    time.sleep(2)
+try:
+    while True:
+        bits = read_165_bits()
+
+        print("Nowe dane:", bits)
+        last_bits = bits
+        time.sleep(0.05)  # 20 Hz odświeżania
+except KeyboardInterrupt:
+    print("Koniec testu")
+    pi.stop()

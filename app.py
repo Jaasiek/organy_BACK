@@ -169,32 +169,52 @@ def start_playing():
             )
 
 
+@socket.on("HOME")
+def home_reset():
+    global step, steps_number, track_name, combination
+
+    step = 0
+    steps_number = 0
+    track_name = ""
+    combination = []
+
+    socket.emit("home_reset")
+
+
 @socket.on("next_step")
 def next_step():
     global step, steps_number
     tracks = open_file()
+    try:
+        if step < steps_number:
+            step += 1
 
-    if step < steps_number:
-        step += 1
-
-        for track in tracks:
-            if track["name"] == track_name:
-                combination = track["combination"][str(step)]
-                update_cords_divisions(combination)
-                socket.emit(
-                    "next_step_info",
-                    {
-                        "success": True,
-                        "steps": f"{step}/{steps_number}",
-                        "combination": combination,
-                    },
-                )
-    else:
+            for track in tracks:
+                if track["name"] == track_name:
+                    combination = track["combination"][str(step)]
+                    update_cords_divisions(combination)
+                    socket.emit(
+                        "next_step_info",
+                        {
+                            "success": True,
+                            "steps": f"{step}/{steps_number}",
+                            "combination": combination,
+                        },
+                    )
+        else:
+            socket.emit(
+                "next_step_info",
+                {
+                    "success": False,
+                    "message": "Wszystkie kroki zostały już wykonane",
+                },
+            )
+    except:
         socket.emit(
             "next_step_info",
             {
                 "success": False,
-                "message": "Wszystkie kroki zostały już wykonane",
+                "message": "Nie można przejść do kolejnego kroku",
             },
         )
 
@@ -384,9 +404,11 @@ def confirm_track(data):
 
 
 if __name__ == "__main__":
-    uart_thread = threading.Thread(target=run, args=(socket,))
-    uart_thread.daemon = True
-    uart_thread.start
+    print("Starting app.py")
+    hc_thread = threading.Thread(target=run, args=(socket, next_step, previoust_step))
+    hc_thread.daemon = True
+    hc_thread.start()
+    print("hc thread should be running")
 
     socket.run(app, host="0.0.0.0", port=2137, debug=False, use_reloader=False)
     # socket.run(app, host="0.0.0.0", port=2137, debug=True)
