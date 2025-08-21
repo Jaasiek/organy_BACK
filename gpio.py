@@ -1,6 +1,7 @@
 import pigpio
 import serial
 import time
+import os
 
 # ======= WYJŚCIA 74HC595 (jak było) =======
 SER_1 = 17
@@ -10,9 +11,12 @@ RCLK = 22
 # ======= ENKODER (jak było) =======
 ENC_CLK = 5
 ENC_DT = 6
+POWER_OFF = 4
 
 REG_MANUAL = 7
-REG_PEDAL = 4
+P_I = 16
+P_II = 20
+I_II = 21
 
 # ======= WEJŚCIA 4x 74HC165 =======
 PIN_165_PL = 19  # SH/LD (aktywny niski)
@@ -38,10 +42,15 @@ pi.set_mode(ENC_CLK, pigpio.INPUT)
 pi.set_pull_up_down(ENC_CLK, pigpio.PUD_UP)
 pi.set_mode(ENC_DT, pigpio.INPUT)
 pi.set_pull_up_down(ENC_DT, pigpio.PUD_UP)
+pi.set_mode(POWER_OFF, pigpio.INPUT)
+pi.set_pull_up_down(POWER_OFF, pigpio.PUD_UP)
 
 # --- init 74HC165 ---
 pi.set_mode(PIN_165_PL, pigpio.OUTPUT)
 pi.set_mode(PIN_165_CP, pigpio.OUTPUT)
+pi.set_mode(I_II, pigpio.OUTPUT)
+pi.set_mode(P_II, pigpio.OUTPUT)
+pi.set_mode(P_I, pigpio.OUTPUT)
 pi.set_mode(PIN_165_Q7, pigpio.INPUT)
 # delikatny pull-up na wejściu odczytu, żeby nie "pływało" gdy łańcuch nieaktywny
 pi.set_pull_up_down(PIN_165_Q7, pigpio.PUD_UP)
@@ -56,14 +65,76 @@ position = 0
 last_encoded = (pi.read(ENC_CLK) << 1) | pi.read(ENC_DT)
 
 
+_last_power_off_time = 0
+DEBOUNCE_TIME_S = 0.2  # 200 ms
+
+
+def power_off_callback(gpio, level, tick, socket):
+    global _last_power_off_time
+    now = time.time()
+    if level == 0 and (now - _last_power_off_time) > DEBOUNCE_TIME_S:
+        _last_power_off_time = now
+        print("Wywołanie shutdown!")
+        socket.emit("shutdown")
+        time.sleep(1)
+        os.system("sudo shutdown now")
+
+
+copel_states = {
+    100: 0,
+    101: 0,
+    102: 0,
+}
+
+
+def apply_copel(type: int):
+    if type == 100:
+        pi.write(P_I, copel_states[100])
+    elif type == 101:
+        pi.write(P_II, copel_states[101])
+    elif type == 102:
+        pi.write(I_II, copel_states[102])
+
+
+def copels(type: int):
+    # toggle – tylko zmiana w słowniku
+    copel_states[type] ^= 1
+    apply_copel(type)
+    print(f"copels({type}) -> {copel_states[type]}")
+
+
+def set_copel(type: int, state: bool):
+    # ustawienie na sztywno
+    copel_states[type] = 1 if state else 0
+    apply_copel(type)
+    print(f"set_copel({type}, {state}) -> {copel_states[type]}")
+
+
+def output_all_one(state: bool):
+    for k in cords:
+        cords[k] = 0 if state == False else 1
+    shift_out_from_cords()
+    set_copel(100, state)
+    set_copel(101, state)
+    set_copel(102, state)
+
+
 # ======= 74HC595 =======
 def shift_out(bit_list, pinout):
+    # pierwszy bit na liście -> pierwszy wysłany -> trafia na ostatni rejestr
+    # dlatego trzeba odwrócić
     for bit in reversed(bit_list):
         pi.write(pinout, bit)
         pi.write(SRCLK, 1)
         pi.write(SRCLK, 0)
     pi.write(RCLK, 1)
     pi.write(RCLK, 0)
+
+
+def shift_out_from_cords():
+    # bierzemy 1..32 w kolejności rosnącej
+    bit_list = [cords[k] for k in sorted(cords.keys(), key=lambda x: int(x))]
+    shift_out(bit_list, SER_1)
 
 
 def update_cords_divisions(selected_ids):
@@ -74,7 +145,7 @@ def update_cords_divisions(selected_ids):
         if key in cords:
             cords[key] = 1
     bit_list = [cords[key] for key in sorted(cords.keys(), key=lambda x: int(x))]
-    shift_out(bit_list, SER_1)
+    shift_out_from_cords()
 
 
 # ======= 74HC165 =======
@@ -146,12 +217,10 @@ _last_165 = None
 
 
 def poll_165_once(socket, next_step, previoust_step):
-    global _last_165
+    global _last_165, cords
     bits = read_165_bits()
     if _last_165 is None:
         _last_165 = bits
-        # pierwszy zrzut
-        print("[74HC165] init:", bits)
 
     if bits != _last_165:
         pressed = [
@@ -161,51 +230,56 @@ def poll_165_once(socket, next_step, previoust_step):
         ]
         if pressed:
             for i in pressed:
+                # Mapowanie wejść -> rejestry
+                number = None
                 match i:
                     case 0:
-                        socket.emit("registers", {"number": 8})
+                        number = 8
                     case 1:
-                        socket.emit("registers", {"number": 7})
+                        number = 7
                     case 2:
-                        socket.emit("registers", {"number": 6})
+                        number = 6
                     case 3:
-                        socket.emit("registers", {"number": 5})
+                        number = 5
                     case 4:
-                        socket.emit("registers", {"number": 4})
+                        number = 4
                     case 5:
-                        socket.emit("registers", {"number": 3})
+                        number = 3
                     case 6:
-                        socket.emit("registers", {"number": 2})
+                        number = 2
                     case 7:
-                        socket.emit("registers", {"number": 1})
+                        number = 1
                     case 8:
-                        socket.emit("registers", {"number": 16})
+                        number = 16
                     case 9:
-                        socket.emit("registers", {"number": 15})
+                        number = 15
                     case 10:
-                        socket.emit("registers", {"number": 14})
+                        number = 14
                     case 11:
-                        socket.emit("registers", {"number": 13})
+                        number = 13
                     case 12:
-                        socket.emit("registers", {"number": 12})
+                        number = 12
                     case 13:
-                        socket.emit("registers", {"number": 11})
+                        number = 11
                     case 14:
-                        socket.emit("registers", {"number": 10})
+                        number = 10
                     case 15:
-                        socket.emit("registers", {"number": 9})
+                        number = 9
                     case 16:
-                        socket.emit("registers", {"number": 102})
+                        number = 102
+                        copels(102)
                     case 17:
-                        socket.emit("registers", {"number": 101})
+                        number = 101
+                        copels(101)
                     case 18:
-                        socket.emit("registers", {"number": 100})
+                        number = 100
+                        copels(100)
                     case 19:
                         socket.emit("TUTTI")
-                        print("TUTTI kurwy")
+                        output_all_one(True)
                     case 20:
-                        print("czyszczenie KURWA MA BYĆ")
                         socket.emit("clear")
+                        output_all_one(False)
                     case 21:
                         previoust_step()
                         print("poprzedni")
@@ -213,25 +287,25 @@ def poll_165_once(socket, next_step, previoust_step):
                         next_step()
                         print("następny")
                     case 23:
-                        socket.emit("registers", {"number": 103})
-                    case 24:
-                        pass
+                        number = 32
                     case 25:
-                        socket.emit("registers", {"number": 25})
+                        number = 25
                     case 26:
-                        socket.emit("registers", {"number": 26})
+                        number = 26
                     case 27:
-                        socket.emit("registers", {"number": 27})
-                    case 28:
-                        pass
-                    case 29:
-                        pass
-                    case 30:
-                        pass
-                    case 31:
-                        pass
-                    case 32:
-                        pass
+                        number = 27
+
+                # Jeśli jest numer rejestru → ustaw w cords i wyślij
+                if number is not None:
+                    if 1 <= number <= 32:
+                        key = str(number)
+                        cords[key] = 1 - cords[key]  # toggle bitu
+                        shift_out_from_cords()
+                        socket.emit("registers", {"number": number})
+                    else:
+                        # Funkcje pomocnicze, nie sterują wyjściami
+                        socket.emit("registers", {"number": number})
+
             print(f"Kliknięto: {pressed}")
 
     _last_165 = bits
@@ -239,7 +313,12 @@ def poll_165_once(socket, next_step, previoust_step):
 
 def run(socket, next_step, previoust_step):
     register_encoder_callbacks(socket)
-    print("Oczekiwanie na dane MIDI oraz ruchy enkodera i rejestry 74HC165...")
+    output_all_one(False)
+    pi.callback(
+        POWER_OFF,
+        pigpio.FALLING_EDGE,
+        lambda g, l, t: power_off_callback(g, l, t, socket),
+    )
 
     try:
         while True:

@@ -4,7 +4,7 @@ from flask_cors import CORS
 import threading
 import json, time
 
-from gpio import update_cords_divisions, run
+from gpio import update_cords_divisions, run, output_all_one, set_copel
 
 
 app = Flask(__name__)
@@ -21,6 +21,11 @@ def open_file() -> list:
     with open("./tracks.json", "r", encoding="utf-8") as file:
         tracks = json.load(file)
     return tracks
+
+
+@socket.on("registers_reset")
+def reset_registers():
+    output_all_one(False)
 
 
 @socket.on("login")
@@ -156,6 +161,9 @@ def start_playing():
     for track in tracks:
         if track["name"] == track_name:
             combination = track["combination"][str(step)]
+            set_copel(100, 100 in combination)
+            set_copel(101, 101 in combination)
+            set_copel(102, 102 in combination)
             update_cords_divisions(combination)
 
             socket.emit(
@@ -192,7 +200,11 @@ def next_step():
             for track in tracks:
                 if track["name"] == track_name:
                     combination = track["combination"][str(step)]
+                    set_copel(100, 100 in combination)
+                    set_copel(101, 101 in combination)
+                    set_copel(102, 102 in combination)
                     update_cords_divisions(combination)
+
                     socket.emit(
                         "next_step_info",
                         {
@@ -206,17 +218,11 @@ def next_step():
                 "next_step_info",
                 {
                     "success": False,
-                    "message": "Wszystkie kroki zostały już wykonane",
+                    "message": "Wszystkie kroki zostałyy już wykonane",
                 },
             )
     except:
-        socket.emit(
-            "next_step_info",
-            {
-                "success": False,
-                "message": "Nie można przejść do kolejnego kroku",
-            },
-        )
+        pass
 
 
 @socket.on("previoust_step")
@@ -230,6 +236,10 @@ def previoust_step(data=None):
             for track in tracks:
                 if track["name"] == data["track_name"]:
                     combination = track["combination"][str(data["step_to_edit"])]
+
+                    set_copel(100, 100 in combination)
+                    set_copel(101, 101 in combination)
+                    set_copel(102, 102 in combination)
                     update_cords_divisions(combination)
                     socket.emit(
                         "previoust_step_info",
@@ -254,6 +264,9 @@ def previoust_step(data=None):
         for track in tracks:
             if track["name"] == track_name:
                 combination = track["combination"][str(step)]
+                set_copel(100, 100 in combination)
+                set_copel(101, 101 in combination)
+                set_copel(102, 102 in combination)
                 update_cords_divisions(combination)
                 socket.emit(
                     "next_step_info",
@@ -264,13 +277,7 @@ def previoust_step(data=None):
                     },
                 )
     else:
-        socket.emit(
-            "previoust_step_info",
-            {
-                "success": False,
-                "message": "Nie można przejść do poprzedniego kroku",
-            },
-        )
+        pass
 
 
 @socket.on("create_track")
@@ -410,5 +417,12 @@ if __name__ == "__main__":
     hc_thread.start()
     print("hc thread should be running")
 
-    socket.run(app, host="0.0.0.0", port=2137, debug=False, use_reloader=False)
+    socket.run(
+        app,
+        host="0.0.0.0",
+        port=2137,
+        debug=False,
+        use_reloader=False,
+        allow_unsafe_werkzeug=True,
+    )
     # socket.run(app, host="0.0.0.0", port=2137, debug=True)
