@@ -112,7 +112,7 @@ def set_copel(type: int, state: bool):
 def output_all_one(state: bool):
     for k in cords:
         cords[k] = 0 if state == False else 1
-        if k == 17:
+        if k == "17":
             cords[k] = 0
     shift_out_from_cords()
     set_copel(100, state)
