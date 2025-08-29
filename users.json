@@ -1,21 +1,5 @@
 [
   {
-    "name": "test",
-    "password": "1234"
-  },
-  {
-    "name": "Proboszcz",
-    "password": "2137"
-  },
-  {
-    "name": "Organista",
-    "password": "6969"
-  },
-  {
-    "name": "Wierci chuj",
-    "password": "1939"
-  },
-  {
     "name": "admin",
     "password": "0000"
   }

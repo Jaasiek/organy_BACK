@@ -66,15 +66,14 @@ last_encoded = (pi.read(ENC_CLK) << 1) | pi.read(ENC_DT)
 
 
 _last_power_off_time = 0
-DEBOUNCE_TIME_S = 0.2  # 200 ms
+DEBOUNCE_TIME_S = 1.0
 
 
-def power_off_callback(gpio, level, tick, socket):
+def power_off_callback(level, socket):
     global _last_power_off_time
     now = time.time()
     if level == 0 and (now - _last_power_off_time) > DEBOUNCE_TIME_S:
         _last_power_off_time = now
-        print("Wywołanie shutdown!")
         socket.emit("shutdown")
         time.sleep(1)
         os.system("sudo shutdown now")
@@ -113,6 +112,8 @@ def set_copel(type: int, state: bool):
 def output_all_one(state: bool):
     for k in cords:
         cords[k] = 0 if state == False else 1
+        if k == 17:
+            cords[k] = 0
     shift_out_from_cords()
     set_copel(100, state)
     set_copel(101, state)
@@ -287,7 +288,7 @@ def poll_165_once(socket, next_step, previoust_step):
                         next_step()
                         print("następny")
                     case 23:
-                        number = 32
+                        number = 17
                     case 25:
                         number = 25
                     case 26:

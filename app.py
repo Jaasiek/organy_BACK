@@ -218,7 +218,7 @@ def next_step():
                 "next_step_info",
                 {
                     "success": False,
-                    "message": "Wszystkie kroki zostałyy już wykonane",
+                    "message": "Wszystkie kroki zostały już wykonane",
                 },
             )
     except:
