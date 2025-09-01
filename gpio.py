@@ -17,6 +17,7 @@ REG_MANUAL = 7
 P_I = 16
 P_II = 20
 I_II = 21
+MIDI = 12
 
 # ======= WEJŚCIA 4x 74HC165 =======
 PIN_165_PL = 19  # SH/LD (aktywny niski)
@@ -51,6 +52,7 @@ pi.set_mode(PIN_165_CP, pigpio.OUTPUT)
 pi.set_mode(I_II, pigpio.OUTPUT)
 pi.set_mode(P_II, pigpio.OUTPUT)
 pi.set_mode(P_I, pigpio.OUTPUT)
+pi.set_mode(MIDI, pigpio.OUTPUT)
 pi.set_mode(PIN_165_Q7, pigpio.INPUT)
 # delikatny pull-up na wejściu odczytu, żeby nie "pływało" gdy łańcuch nieaktywny
 pi.set_pull_up_down(PIN_165_Q7, pigpio.PUD_UP)
@@ -84,6 +86,10 @@ copel_states = {
     101: 0,
     102: 0,
 }
+
+
+def toggle_keyboard(state):
+    pi.write(MIDI, 0 if state == False else 1)
 
 
 def apply_copel(type: int):
@@ -318,7 +324,7 @@ def run(socket, next_step, previoust_step):
     pi.callback(
         POWER_OFF,
         pigpio.FALLING_EDGE,
-        lambda g, l, t: power_off_callback(g, l, t, socket),
+        lambda g, l, t: power_off_callback(l, socket),
     )
 
     try:

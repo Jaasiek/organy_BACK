@@ -5,6 +5,7 @@ import threading
 import json, time
 
 from gpio import update_cords_divisions, run, output_all_one, set_copel
+from midi import MIDI
 
 
 app = Flask(__name__)
@@ -408,6 +409,11 @@ def confirm_track(data):
             "message": f"Utwór „{data['track_name']}” został utworzony.",
         },
     )
+
+
+@socket.on("MIDI")
+def midi_start():
+    MIDI()
 
 
 if __name__ == "__main__":
