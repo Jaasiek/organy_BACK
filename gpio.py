@@ -88,8 +88,8 @@ copel_states = {
 }
 
 
-def toggle_keyboard(state):
-    pi.write(MIDI, 0 if state == False else 1)
+def disable_keyboard(state):
+    pi.write(MIDI, 0 if state == True else 1)
 
 
 def apply_copel(type: int):

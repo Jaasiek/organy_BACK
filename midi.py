@@ -1,10 +1,10 @@
 import time
 import serial
+import threading
 import mido
-from gpio import toggle_keyboard
+from gpio import disable_keyboard
 
 # === KONFIG ===
-MIDI_FILE = "/home/pi/utwor.mid"
 SERIAL_DEV = "/dev/serial0"  # albo /dev/ttyAMA0 w zależności od RPi
 BAUD = 31250
 
@@ -14,7 +14,6 @@ channel_map = {
     0: 0,  # kanał 1 -> 1
     1: 1,  # kanał 2 -> 2
     2: 2,  # kanał 3 -> 3
-    # wszystkie inne możesz np. skomentować lub wskazać na któryś z powyższych
 }
 
 
@@ -66,47 +65,203 @@ def msg_to_bytes(msg):
     return bytes([status] + data)
 
 
-def MIDI():
-    ser = serial.Serial(
-        SERIAL_DEV,
-        BAUD,
-        bytesize=serial.EIGHTBITS,
-        parity=serial.PARITY_NONE,
-        stopbits=serial.STOPBITS_ONE,
-    )
-    mf = mido.MidiFile(MIDI_FILE)
-    toggle_keyboard(True)
-    start = time.monotonic()
-    current = start
+class MidiPlayer:
+    def __init__(
+        self, file_path, serial_dev="/dev/serial0", baud=31250, channel_map=channel_map
+    ):
+        self.file_path = file_path
+        self.serial_dev = serial_dev
+        self.baud = baud
+        self.channel_map = channel_map or {}
+        self.mid = mido.MidiFile(file_path)
+        # total length (seconds) — mido provides .length dla type 0/1 plików
+        try:
+            self.total_length = self.mid.length
+        except Exception:
+            # alternatywnie można policzyć manualnie albo użyć pretty_midi
+            self.total_length = None
 
-    for msg in mf:  # mido uwzględnia msg.time jako sekundowe opóźnienia
-        # odczekaj czas między zdarzeniami
-        if msg.time > 0:
-            time.sleep(msg.time)
+        self._thread = None
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()  # when set -> paused
+        self._lock = threading.Lock()
+        self._elapsed = 0.0  # elapsed seconds of playback
+        self._ser = None
 
-        # przemapuj kanał dla komunikatów kanałowych
-        if hasattr(msg, "channel"):
-            if msg.channel in channel_map:
-                msg.channel = channel_map[msg.channel]
-            else:
-                # np. ignoruj inne kanały
+    def _open_serial(self):
+        if self._ser and self._ser.is_open:
+            return
+        self._ser = serial.Serial(
+            self.serial_dev,
+            self.baud,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+        )
+
+    def _close_serial(self):
+        if self._ser:
+            try:
+                self._ser.close()
+            except Exception:
+                pass
+            self._ser = None
+
+    def _send_raw(self, raw: bytes):
+        if not raw:
+            return
+        try:
+            self._open_serial()
+            self._ser.write(raw)
+        except Exception as e:
+            print("Błąd wysyłki MIDI:", e)
+
+    def _play_worker(self):
+        # worker który iteruje przez wiadomości z czasem (seconds)
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self._elapsed = 0.0
+        last_time = time.monotonic()
+
+        disable_keyboard(True)
+        # mido.MidiFile.play() yields messages with .time == seconds since last message
+        for msg in self.mid.play():
+            if self._stop_event.is_set():
+                break
+
+            # jeśli pauza aktywna -> czekaj (przy utrzymaniu poprawnego czasu)
+            wait = msg.time
+            start_wait = time.monotonic()
+            remaining = wait
+            while remaining > 0:
+                if self._stop_event.is_set():
+                    break
+                if self._pause_event.is_set():
+                    # w pauzie — czekamy do wznowienia i przesuwamy punkt startu
+                    pause_start = time.monotonic()
+                    while self._pause_event.is_set() and not self._stop_event.is_set():
+                        time.sleep(0.05)
+                    # po wznowieniu: policz ile byliśmy zatrzymani i przesuwamy czas oczekiwania
+                    paused_for = time.monotonic() - pause_start
+                    start_wait += paused_for
+                    remaining = wait - (time.monotonic() - start_wait)
+                    continue
+                # niepauzujemy, krótkie sleepy by być responsywnym
+                to_sleep = min(0.02, remaining)
+                time.sleep(to_sleep)
+                remaining = wait - (time.monotonic() - start_wait)
+
+            if self._stop_event.is_set():
+                break
+
+            # przemapuj kanał jeśli trzeba
+            if hasattr(msg, "channel"):
+                if msg.channel in self.channel_map:
+                    msg.channel = self.channel_map[msg.channel]
+                else:
+                    # ignoruj inne kanały (jak w Twoim przykładzie)
+                    continue
+
+            # note_on vel=0 -> note_off (porządkujące)
+            if msg.type == "note_on" and getattr(msg, "velocity", 0) == 0:
+                msg.type = "note_off"
+
+            if msg.is_meta or msg.type == "sysex":
+                # pomiń meta i sysex, chyba że chcesz je wysyłać
                 continue
 
-        # zamień NoteOn vel=0 -> NoteOff (niekonieczne, ale schludne)
-        if msg.type == "note_on" and msg.velocity == 0:
-            msg.type = "note_off"
+            raw = msg_to_bytes(msg)
+            if raw:
+                self._send_raw(raw)
 
-        # pomiń meta i SysEx (chyba że potrzebujesz)
-        if msg.is_meta or msg.type == "sysex":
-            continue
+            # zaktualizuj elapsed (safe)
+            with self._lock:
+                self._elapsed += msg.time
 
-        raw = msg_to_bytes(msg)
-        if raw:
-            ser.write(raw)
+        # zakończenie
+        self._close_serial()
+        disable_keyboard(False)
 
-    ser.close()
-    toggle_keyboard(False)
+    def play(self):
+        if self._thread and self._thread.is_alive():
+            # już gramy — restartuj od początku jeśli chcesz
+            return
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self._thread = threading.Thread(target=self._play_worker, daemon=True)
+        self._thread.start()
+        disable_keyboard(True)
+
+    def pause(self):
+        self._pause_event.set()
+
+    def resume(self):
+        self._pause_event.clear()
+
+    def stop(self):
+        self._stop_event.set()
+        self._pause_event.clear()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        # reset elapsed
+        with self._lock:
+            self._elapsed = 0.0
+
+    def get_position(self):
+        with self._lock:
+            return self._elapsed
+
+    def get_total(self):
+        return self.total_length
+
+    def is_playing(self):
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and not self._pause_event.is_set()
+        )
+
+    def is_paused(self):
+        return self._pause_event.is_set()
 
 
-if __name__ == "__main__":
-    MIDI()
+# def MIDI(file_path):
+#     ser = serial.Serial(
+#         SERIAL_DEV,
+#         BAUD,
+#         bytesize=serial.EIGHTBITS,
+#         parity=serial.PARITY_NONE,
+#         stopbits=serial.STOPBITS_ONE,
+#     )
+#     mf = mido.MidiFile(file_path)
+#     toggle_keyboard(True)
+#     start = time.monotonic()
+#     current = start
+
+#     for msg in mf:  # mido uwzględnia msg.time jako sekundowe opóźnienia
+#         # odczekaj czas między zdarzeniami
+#         if msg.time > 0:
+#             time.sleep(msg.time)
+
+#         # przemapuj kanał dla komunikatów kanałowych
+#         if hasattr(msg, "channel"):
+#             if msg.channel in channel_map:
+#                 msg.channel = channel_map[msg.channel]
+#             else:
+#                 # np. ignoruj inne kanały
+#                 continue
+
+#         # zamień NoteOn vel=0 -> NoteOff (niekonieczne, ale schludne)
+#         if msg.type == "note_on" and msg.velocity == 0:
+#             msg.type = "note_off"
+
+#         # pomiń meta i SysEx (chyba że potrzebujesz)
+#         if msg.is_meta or msg.type == "sysex":
+#             continue
+
+#         raw = msg_to_bytes(msg)
+#         if raw:
+#             ser.write(raw)
+
+#     ser.close()
+#     toggle_keyboard(False)
