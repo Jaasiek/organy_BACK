@@ -119,7 +119,7 @@ def clear_mount_and_notify(socketio, connected_sids, app=None):
             try:
                 socketio.emit(
                     "directory_tree_cleared",
-                    {"path": MOUNTPOINT},
+                    {"path": MOUNTPOINT, "message": "Dysk USB został usunięty"},
                     namespace="/",
                     room=sid,
                 )

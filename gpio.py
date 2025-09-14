@@ -63,6 +63,7 @@ pi.write(PIN_165_CP, 0)
 
 cords = {str(i): 0 for i in range(1, 33)}
 
+
 position = 0
 last_encoded = (pi.read(ENC_CLK) << 1) | pi.read(ENC_DT)
 

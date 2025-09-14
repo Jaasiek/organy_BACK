@@ -5,7 +5,8 @@ import mido
 from gpio import disable_keyboard
 
 # === KONFIG ===
-SERIAL_DEV = "/dev/serial0"  # albo /dev/ttyAMA0 w zależności od RPi
+SERIAL_DEV = "/dev/pts/2"
+# albo /dev/ttyAMA0 w zależności od RPi
 BAUD = 31250
 
 # mapowanie kanałów: stary -> nowy (0-15)
@@ -15,6 +16,28 @@ channel_map = {
     1: 1,  # kanał 2 -> 2
     2: 2,  # kanał 3 -> 3
 }
+
+
+def compute_total_seconds(mid: mido.MidiFile) -> float:
+    """
+    Dokładne obliczenie długości MIDI w sekundach.
+    Łączymy tracki (merge_tracks) i iterujemy po komunikatach w tickach,
+    konwertując każdy delta-tick -> delta-sekundy z użyciem aktualnego tempa.
+    """
+    ticks_per_beat = mid.ticks_per_beat
+    tempo = 500000  # domyślne tempo w mikrosekundach na beat
+    total = 0.0
+
+    # mido.merge_tracks zwraca iterator/track z komunikatami, z time w tickach
+    for msg in mido.merge_tracks(mid.tracks):
+        if msg.time:
+            # przelicz delta-ticks na sekundy przy aktualnym tempie
+            total += mido.tick2second(msg.time, ticks_per_beat, tempo)
+        # jeśli napotkamy zmianę tempa — zaktualizujmy tempo dla kolejnych delta
+        if msg.type == "set_tempo":
+            tempo = msg.tempo
+
+    return total
 
 
 def msg_to_bytes(msg):
@@ -67,25 +90,34 @@ def msg_to_bytes(msg):
 
 class MidiPlayer:
     def __init__(
-        self, file_path, serial_dev="/dev/serial0", baud=31250, channel_map=channel_map
+        self, file_path, serial_dev="/dev/pts/2", baud=31250, channel_map=channel_map
     ):
         self.file_path = file_path
         self.serial_dev = serial_dev
         self.baud = baud
         self.channel_map = channel_map or {}
         self.mid = mido.MidiFile(file_path)
-        # total length (seconds) — mido provides .length dla type 0/1 plików
-        try:
-            self.total_length = self.mid.length
-        except Exception:
-            # alternatywnie można policzyć manualnie albo użyć pretty_midi
-            self.total_length = None
 
+        # dokladne total seconds
+        try:
+            self.total_length = compute_total_seconds(self.mid)
+        except Exception:
+            try:
+                self.total_length = float(self.mid.length)
+            except Exception:
+                self.total_length = None
+
+        # thread / sync
         self._thread = None
         self._stop_event = threading.Event()
-        self._pause_event = threading.Event()  # when set -> paused
+        self._pause_event = threading.Event()
         self._lock = threading.Lock()
-        self._elapsed = 0.0  # elapsed seconds of playback
+
+        # timing (monotonic-based)
+        self._start_time = None  # moment startu odtwarzania (time.monotonic)
+        self._paused_total = 0.0  # skumulowany czas pauzy (sekundy)
+        self._pause_start = None  # moment rozpoczęcia obecnej pauzy (jeśli pauza)
+
         self._ser = None
 
     def _open_serial(self):
@@ -97,6 +129,7 @@ class MidiPlayer:
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
+            timeout=0,
         )
 
     def _close_serial(self):
@@ -112,24 +145,30 @@ class MidiPlayer:
             return
         try:
             self._open_serial()
+            # write może być blokujące; jeśli testujemy bez portu można złapać wyjątki
             self._ser.write(raw)
         except Exception as e:
             print("Błąd wysyłki MIDI:", e)
 
     def _play_worker(self):
-        # worker który iteruje przez wiadomości z czasem (seconds)
+        """Wątek odtwarzający — nie liczymy w nim pozycji, tylko wysyłamy komunikaty."""
         self._stop_event.clear()
         self._pause_event.clear()
-        self._elapsed = 0.0
-        last_time = time.monotonic()
+
+        # ustawienie start_time jeśli nie ustawiono (chroni przypadek restartu)
+        with self._lock:
+            if self._start_time is None:
+                self._start_time = time.monotonic()
+                self._paused_total = 0.0
+                self._pause_start = None
 
         disable_keyboard(True)
-        # mido.MidiFile.play() yields messages with .time == seconds since last message
+
         for msg in self.mid.play():
             if self._stop_event.is_set():
                 break
 
-            # jeśli pauza aktywna -> czekaj (przy utrzymaniu poprawnego czasu)
+            # implementacja pauzy: jeśli pauza, to czekamy tutaj dopóki nie wznowione
             wait = msg.time
             start_wait = time.monotonic()
             remaining = wait
@@ -137,16 +176,23 @@ class MidiPlayer:
                 if self._stop_event.is_set():
                     break
                 if self._pause_event.is_set():
-                    # w pauzie — czekamy do wznowienia i przesuwamy punkt startu
-                    pause_start = time.monotonic()
+                    # jeśli pauzujemy po raz pierwszy -> zapamiętaj moment pauzy
+                    with self._lock:
+                        if self._pause_start is None:
+                            self._pause_start = time.monotonic()
+                    # czekamy aż pauza się skończy
                     while self._pause_event.is_set() and not self._stop_event.is_set():
                         time.sleep(0.05)
-                    # po wznowieniu: policz ile byliśmy zatrzymani i przesuwamy czas oczekiwania
-                    paused_for = time.monotonic() - pause_start
-                    start_wait += paused_for
-                    remaining = wait - (time.monotonic() - start_wait)
+                    # po wznowieniu zaktualizuj skumulowaną pauzę
+                    with self._lock:
+                        if self._pause_start is not None:
+                            self._paused_total += time.monotonic() - self._pause_start
+                            self._pause_start = None
+                    # przesuwamy punkt start_wait zgodnie z czasem spędzonym w pauzie
+                    start_wait = time.monotonic()
+                    remaining = wait
                     continue
-                # niepauzujemy, krótkie sleepy by być responsywnym
+                # krótka pauza dla responsywności
                 to_sleep = min(0.02, remaining)
                 time.sleep(to_sleep)
                 remaining = wait - (time.monotonic() - start_wait)
@@ -154,38 +200,50 @@ class MidiPlayer:
             if self._stop_event.is_set():
                 break
 
-            # przemapuj kanał jeśli trzeba
+            # mapowanie kanału (jak wcześniej)
             if hasattr(msg, "channel"):
                 if msg.channel in self.channel_map:
                     msg.channel = self.channel_map[msg.channel]
                 else:
-                    # ignoruj inne kanały (jak w Twoim przykładzie)
+                    # ignoruj inne kanały
                     continue
 
-            # note_on vel=0 -> note_off (porządkujące)
+            # note_on vel=0 -> note_off
             if msg.type == "note_on" and getattr(msg, "velocity", 0) == 0:
-                msg.type = "note_off"
+                msg = mido.Message(
+                    "note_off", note=msg.note, velocity=0, channel=msg.channel
+                )
 
             if msg.is_meta or msg.type == "sysex":
-                # pomiń meta i sysex, chyba że chcesz je wysyłać
                 continue
 
             raw = msg_to_bytes(msg)
             if raw:
                 self._send_raw(raw)
 
-            # zaktualizuj elapsed (safe)
-            with self._lock:
-                self._elapsed += msg.time
-
-        # zakończenie
+        # zakończenie odtwarzania
         self._close_serial()
         disable_keyboard(False)
 
+        # opcjonalnie: oznacz, że odtwarzanie zakończone
+        with self._lock:
+            # ustawiamy start_time na None aby get_position zwracało 0 po stopie
+            self._start_time = None
+            self._paused_total = 0.0
+            self._pause_start = None
+
     def play(self):
+        # start odtwarzania od początku
         if self._thread and self._thread.is_alive():
-            # już gramy — restartuj od początku jeśli chcesz
+            # jeśli już gra, nic nie robimy
             return
+
+        # ustawianie czasów startu
+        with self._lock:
+            self._start_time = time.monotonic()
+            self._paused_total = 0.0
+            self._pause_start = None
+
         self._stop_event.clear()
         self._pause_event.clear()
         self._thread = threading.Thread(target=self._play_worker, daemon=True)
@@ -193,23 +251,40 @@ class MidiPlayer:
         disable_keyboard(True)
 
     def pause(self):
+        # zaznaczamy pauzę; worker zajmie się zapamiętaniem _pause_start
         self._pause_event.set()
 
     def resume(self):
+        # wznowienie: worker dokona akumulacji pauzy przy następnym cyklu
         self._pause_event.clear()
 
     def stop(self):
         self._stop_event.set()
+        # skasowanie pauzy
         self._pause_event.clear()
         if self._thread:
             self._thread.join(timeout=1.0)
-        # reset elapsed
         with self._lock:
-            self._elapsed = 0.0
+            self._start_time = None
+            self._paused_total = 0.0
+            self._pause_start = None
 
-    def get_position(self):
+    def get_position(self) -> float:
+        """Zwraca przebieg w sekundach (float)."""
         with self._lock:
-            return self._elapsed
+            if self._start_time is None:
+                return 0.0
+            if self._pause_event.is_set() and self._pause_start is not None:
+                # jeśli aktualnie pauzujemy, pozycja to moment pauzy minus czas startu minus skumulowane poprzednie pauzy
+                return max(
+                    0.0, self._pause_start - self._start_time - self._paused_total
+                )
+            else:
+                # zwykłe liczenie: bieżący monotonic - start - skumulowane pauzy
+                elapsed = time.monotonic() - self._start_time - self._paused_total
+                if self.total_length is not None:
+                    return min(self.total_length, max(0.0, elapsed))
+                return max(0.0, elapsed)
 
     def get_total(self):
         return self.total_length
@@ -223,45 +298,3 @@ class MidiPlayer:
 
     def is_paused(self):
         return self._pause_event.is_set()
-
-
-# def MIDI(file_path):
-#     ser = serial.Serial(
-#         SERIAL_DEV,
-#         BAUD,
-#         bytesize=serial.EIGHTBITS,
-#         parity=serial.PARITY_NONE,
-#         stopbits=serial.STOPBITS_ONE,
-#     )
-#     mf = mido.MidiFile(file_path)
-#     toggle_keyboard(True)
-#     start = time.monotonic()
-#     current = start
-
-#     for msg in mf:  # mido uwzględnia msg.time jako sekundowe opóźnienia
-#         # odczekaj czas między zdarzeniami
-#         if msg.time > 0:
-#             time.sleep(msg.time)
-
-#         # przemapuj kanał dla komunikatów kanałowych
-#         if hasattr(msg, "channel"):
-#             if msg.channel in channel_map:
-#                 msg.channel = channel_map[msg.channel]
-#             else:
-#                 # np. ignoruj inne kanały
-#                 continue
-
-#         # zamień NoteOn vel=0 -> NoteOff (niekonieczne, ale schludne)
-#         if msg.type == "note_on" and msg.velocity == 0:
-#             msg.type = "note_off"
-
-#         # pomiń meta i SysEx (chyba że potrzebujesz)
-#         if msg.is_meta or msg.type == "sysex":
-#             continue
-
-#         raw = msg_to_bytes(msg)
-#         if raw:
-#             ser.write(raw)
-
-#     ser.close()
-#     toggle_keyboard(False)

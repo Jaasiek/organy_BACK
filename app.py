@@ -18,6 +18,9 @@ midi_instance = None
 midi_monitor_thread = None
 midi_monitor_stop = threading.Event()
 midi_lock = threading.Lock()
+midi_monitor_stop = threading.Event()
+midi_lock = threading.Lock()
+midi_file_path = "/home/pi/test.mid"
 
 global track_name, step, steps_number, tracks, combination
 step = 0
@@ -449,14 +452,20 @@ def _start_midi_monitor():
 
     midi_monitor_stop.clear()
 
+    def fmt_time(seconds: float) -> str:
+        if seconds is None:
+            return "00:00"
+        m, s = divmod(int(seconds), 60)
+        return f"{m:02d}:{s:02d}"
+
     def monitor():
+        global midi_instance
         last_finished_emitted = False
         while not midi_monitor_stop.is_set():
             with midi_lock:
                 inst = midi_instance
 
             if inst is None:
-                # brak instancji -> pauza krótkiego loopa
                 time.sleep(0.3)
                 continue
 
@@ -466,16 +475,16 @@ def _start_midi_monitor():
 
             payload = {
                 "file": getattr(inst, "file_path", None),
-                "position": pos,
-                "total": total,
-                "remaining": remaining,
+                "position": fmt_time(pos),
+                "total": fmt_time(total),
+                "remaining": fmt_time(remaining),
                 "is_playing": inst.is_playing(),
                 "is_paused": inst.is_paused(),
             }
 
             try:
                 # broadcast do wszystkich (zmień na namespace/room jeśli chcesz)
-                socket.emit("midi_status", payload, namespace="/", broadcast=True)
+                socket.emit("midi_status", payload, namespace="/")
             except Exception as e:
                 print("ERROR emitting midi_status:", e)
 
@@ -487,7 +496,6 @@ def _start_midi_monitor():
                             "midi_finished",
                             {"file": getattr(inst, "file_path", None)},
                             namespace="/",
-                            broadcast=True,
                         )
                     except Exception as e:
                         print("ERROR emitting midi_finished:", e)
@@ -505,9 +513,17 @@ def _start_midi_monitor():
     return t
 
 
+@socket.on("MIDI_track")
+def midi_track(data):
+    global midi_file_path
+    midi_file_path = data["filePath"]
+
+    socket.emit("track_selected", {"success": True, "title": data["fileName"]})
+
+
 @socket.on("MIDI_start")
-def midi_start(file_path):
-    global midi_instance, midi_monitor_thread, midi_monitor_stop
+def midi_start():
+    global midi_instance, midi_monitor_thread, midi_monitor_stop, midi_file_path
 
     try:
         # jeśli już coś gra -> zatrzymaj i wyczyść
@@ -520,7 +536,7 @@ def midi_start(file_path):
                 midi_instance = None
 
             # utwórz nowy player i odpal
-            midi_instance = MidiPlayer(file_path)
+            midi_instance = MidiPlayer(midi_file_path)
             midi_instance.play()
 
         # (re)start monitora jeżeli nie działa
@@ -530,7 +546,7 @@ def midi_start(file_path):
 
         socket.emit(
             "midi_started",
-            {"success": True, "file": file_path},
+            {"success": True, "file": midi_file_path},
             namespace="/",
             room=request.sid,
         )
@@ -546,9 +562,7 @@ def socket_midi_pause():
         with midi_lock:
             if midi_instance:
                 midi_instance.pause()
-                socket.emit(
-                    "midi_paused", {"success": True}, namespace="/", broadcast=True
-                )
+                socket.emit("midi_paused", {"success": True}, namespace="/")
             else:
                 socket.emit(
                     "midi_paused",
@@ -568,9 +582,7 @@ def socket_midi_resume():
         with midi_lock:
             if midi_instance:
                 midi_instance.resume()
-                socket.emit(
-                    "midi_resumed", {"success": True}, namespace="/", broadcast=True
-                )
+                socket.emit("midi_resumed", {"success": True}, namespace="/")
             else:
                 socket.emit(
                     "midi_resumed",
@@ -595,7 +607,7 @@ def socket_midi_stop():
         # zatrzymaj monitor (jeśli chcesz go trwale zatrzymać)
         midi_monitor_stop.set()
 
-        socket.emit("midi_stopped", {"success": True}, namespace="/", broadcast=True)
+        socket.emit("midi_stopped", {"success": True}, namespace="/")
     except Exception as e:
         print("ERROR stopping MIDI:", e)
         socket.emit("midi_error", {"message": str(e)}, namespace="/", room=request.sid)
@@ -628,16 +640,20 @@ def midi_get_status():
         pos = inst.get_position()
         total = inst.get_total()
         remaining = None if total is None else max(0.0, total - pos)
+
+        # zaokrąglamy:
+
+        payload = {
+            "file": getattr(inst, "file_path", None),
+            "position": round(pos, 2),
+            "total": round(total, 2),
+            "remaining": round(remaining, 2),
+            "is_playing": inst.is_playing(),
+            "is_paused": inst.is_paused(),
+        }
         socket.emit(
             "midi_status",
-            {
-                "file": inst.file_path,
-                "position": pos,
-                "total": total,
-                "remaining": remaining,
-                "is_playing": inst.is_playing(),
-                "is_paused": inst.is_paused(),
-            },
+            payload,
             namespace="/",
             room=request.sid,
         )
