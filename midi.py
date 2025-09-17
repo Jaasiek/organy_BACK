@@ -90,7 +90,7 @@ def msg_to_bytes(msg):
 
 class MidiPlayer:
     def __init__(
-        self, file_path, serial_dev=SERIAL_DEV, baud=31250, channel_map=channel_map
+        self, file_path, serial_dev=SERIAL_DEV, baud=BAUD, channel_map=channel_map
     ):
         self.file_path = file_path
         self.serial_dev = serial_dev
