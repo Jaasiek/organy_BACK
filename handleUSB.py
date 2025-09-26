@@ -57,16 +57,33 @@ def scan_directory(path, socketio, connected_sids):
 def mount_and_scan(devnode, socketio, connected_sids, app=None):
     os.makedirs(MOUNTPOINT, exist_ok=True)
     try:
+        # wymuszony mount FAT32 z uid/gid pi
         subprocess.run(
-            ["sudo", "mount", "-o", "utf8,iocharset=utf8", devnode, MOUNTPOINT],
+            [
+                "sudo",
+                "mount",
+                "-t",
+                "vfat",
+                "-o",
+                "utf8,iocharset=utf8,uid=1000,gid=1000",
+                devnode,
+                MOUNTPOINT,
+            ],
             check=True,
         )
         print(f"Dysk {devnode} zamontowany w {MOUNTPOINT}")
+
+        # Poczekaj, aż system "odświeży" prawa
+        time.sleep(0.5)  # 500ms powinno wystarczyć
+
+        # opcjonalnie sprawdź prawa
+        st = os.stat(MOUNTPOINT)
+        print("DEBUG: mount permissions:", oct(st.st_mode))
+
     except subprocess.CalledProcessError:
         print(f"Nie udało się zamontować {devnode}")
         return
 
-    # Jeśli potrzebny kontekst aplikacji, wejdź w niego (bezpieczne do wywołań flaskowych)
     if app:
         with app.app_context():
             scan_directory(MOUNTPOINT, socketio, connected_sids)
