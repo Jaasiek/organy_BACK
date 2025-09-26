@@ -1,53 +1,21 @@
-from flask import Flask, request
+from flask import Flask
 from flask_socketio import SocketIO
 from flask_cors import CORS
 import threading
 import json, time
 
 from gpio import update_cords_divisions, run, output_all_one, set_copel
-from midi import MidiPlayer
-from handleUSB import usb_monitor, handle_scan, send_last_tree, last_tree
+from midi import MIDI
 
 
 app = Flask(__name__)
 CORS(app)
-socket = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socket = SocketIO(app, cors_allowed_origins="*")
 
-connected_sids = set()
-midi_instance = None
-midi_monitor_thread = None
-midi_monitor_stop = threading.Event()
-midi_lock = threading.Lock()
-midi_monitor_stop = threading.Event()
-midi_lock = threading.Lock()
-midi_file_path = ""
 
 global track_name, step, steps_number, tracks, combination
 step = 0
 combination = []
-
-
-@socket.on("connect")
-def on_connect():
-    sid = request.sid
-    connected_sids.add(sid)
-    print(f"DEBUG: Client connected: {sid}. Connected clients: {len(connected_sids)}")
-
-    try:
-        if last_tree:
-            socket.emit("directory_tree", last_tree, namespace="/", room=sid)
-            print(f"DEBUG: wyslano last_tree do {sid}")
-    except Exception as e:
-        print("ERROR podczas wysyłania last_tree na connect:", e)
-
-
-@socket.on("disconnect")
-def on_disconnect():
-    sid = request.sid
-    connected_sids.discard(sid)
-    print(
-        f"DEBUG: Client disconnected: {sid}. Connected clients: {len(connected_sids)}"
-    )
 
 
 def open_file() -> list:
@@ -443,260 +411,18 @@ def confirm_track(data):
     )
 
 
-# MIDI
-
-
-def _start_midi_monitor():
-    """Wątek okresowo emituje status MIDI do wszystkich połączonych klientów."""
-    global midi_instance, midi_monitor_stop
-
-    midi_monitor_stop.clear()
-
-    def fmt_time(seconds: float) -> str:
-        if seconds is None:
-            return "00:00"
-        m, s = divmod(int(seconds), 60)
-        return f"{m:02d}:{s:02d}"
-
-    def monitor():
-        global midi_instance
-        last_finished_emitted = False
-        while not midi_monitor_stop.is_set():
-            with midi_lock:
-                inst = midi_instance
-
-            if inst is None:
-                time.sleep(0.3)
-                continue
-
-            pos = inst.get_position()
-            total = inst.get_total()
-            remaining = None if total is None else max(0.0, total - pos)
-
-            payload = {
-                "file": getattr(inst, "file_path", None),
-                "position": fmt_time(pos),
-                "total": fmt_time(total),
-                "remaining": fmt_time(remaining),
-                "is_playing": inst.is_playing(),
-                "is_paused": inst.is_paused(),
-            }
-
-            try:
-                # broadcast do wszystkich (zmień na namespace/room jeśli chcesz)
-                socket.emit("midi_status", payload, namespace="/")
-            except Exception as e:
-                print("ERROR emitting midi_status:", e)
-
-            # jeżeli zakończono odtwarzanie (nie żywy wątek i nie pauza) -> wyemituj finished i przerwij monitor
-            if not inst.is_playing() and not inst.is_paused():
-                if not last_finished_emitted:
-                    try:
-                        socket.emit(
-                            "midi_finished",
-                            {"file": getattr(inst, "file_path", None)},
-                            namespace="/",
-                        )
-                    except Exception as e:
-                        print("ERROR emitting midi_finished:", e)
-                    last_finished_emitted = True
-                    # usuń instancję po krótkim czasie (żeby get_position dalej działało, można też natychmiast)
-                    # tu usuwamy instancję żeby kolejny start zaczynał od nowa
-                    with midi_lock:
-                        midi_instance = None
-                    break
-
-            time.sleep(0.5)
-
-    t = threading.Thread(target=monitor, daemon=True)
-    t.start()
-    return t
-
-
-@socket.on("MIDI_track")
-def midi_track(data):
-    global midi_file_path
-    midi_file_path = data["filePath"]
-
-    socket.emit("track_selected", {"success": True, "title": data["fileName"]})
-
-
-@socket.on("MIDI_start")
+@socket.on("MIDI")
 def midi_start():
-    global midi_instance, midi_monitor_thread, midi_monitor_stop, midi_file_path
-
-    try:
-        # jeśli już coś gra -> zatrzymaj i wyczyść
-        with midi_lock:
-            if midi_instance:
-                try:
-                    midi_instance.stop()
-                except Exception:
-                    pass
-                midi_instance = None
-
-            # utwórz nowy player i odpal
-            midi_instance = MidiPlayer(midi_file_path)
-            midi_instance.play()
-
-        # (re)start monitora jeżeli nie działa
-        if midi_monitor_thread is None or not midi_monitor_thread.is_alive():
-            midi_monitor_stop.clear()
-            midi_monitor_thread = _start_midi_monitor()
-
-        socket.emit(
-            "midi_started",
-            {"success": True, "file": midi_file_path},
-            namespace="/",
-            room=request.sid,
-        )
-    except Exception as e:
-        print("ERROR starting MIDI:", e)
-        socket.emit("midi_error", {"message": str(e)}, namespace="/", room=request.sid)
-
-
-@socket.on("MIDI_pause")
-def socket_midi_pause():
-    global midi_instance
-    try:
-        with midi_lock:
-            if midi_instance:
-                midi_instance.pause()
-                socket.emit("midi_paused", {"success": True}, namespace="/")
-            else:
-                socket.emit(
-                    "midi_paused",
-                    {"success": False, "message": "No active midi"},
-                    namespace="/",
-                    room=request.sid,
-                )
-    except Exception as e:
-        print("ERROR pausing MIDI:", e)
-        socket.emit("midi_error", {"message": str(e)}, namespace="/", room=request.sid)
-
-
-@socket.on("MIDI_resume")
-def socket_midi_resume():
-    global midi_instance
-    try:
-        with midi_lock:
-            if midi_instance:
-                midi_instance.resume()
-                socket.emit("midi_resumed", {"success": True}, namespace="/")
-            else:
-                socket.emit(
-                    "midi_resumed",
-                    {"success": False, "message": "No active midi"},
-                    namespace="/",
-                    room=request.sid,
-                )
-    except Exception as e:
-        print("ERROR resuming MIDI:", e)
-        socket.emit("midi_error", {"message": str(e)}, namespace="/", room=request.sid)
-
-
-@socket.on("MIDI_stop")
-def socket_midi_stop():
-    global midi_instance, midi_monitor_stop
-    try:
-        with midi_lock:
-            if midi_instance:
-                midi_instance.stop()
-                midi_instance = None
-
-        # zatrzymaj monitor (jeśli chcesz go trwale zatrzymać)
-        midi_monitor_stop.set()
-
-        socket.emit("midi_stopped", {"success": True}, namespace="/")
-    except Exception as e:
-        print("ERROR stopping MIDI:", e)
-        socket.emit("midi_error", {"message": str(e)}, namespace="/", room=request.sid)
-
-
-@socket.on("MIDI_get_status")
-def midi_get_status():
-    """Jednorazowe zapytanie o status (zwraca pozycję/total/remaining)."""
-    global midi_instance
-    try:
-        with midi_lock:
-            inst = midi_instance
-
-        if not inst:
-            socket.emit(
-                "midi_status",
-                {
-                    "file": None,
-                    "position": 0,
-                    "total": 0,
-                    "remaining": 0,
-                    "is_playing": False,
-                    "is_paused": False,
-                },
-                namespace="/",
-                room=request.sid,
-            )
-            return
-
-        pos = inst.get_position()
-        total = inst.get_total()
-        remaining = None if total is None else max(0.0, total - pos)
-
-        # zaokrąglamy:
-
-        payload = {
-            "file": getattr(inst, "file_path", None),
-            "position": round(pos, 2),
-            "total": round(total, 2),
-            "remaining": round(remaining, 2),
-            "is_playing": inst.is_playing(),
-            "is_paused": inst.is_paused(),
-        }
-        socket.emit(
-            "midi_status",
-            payload,
-            namespace="/",
-            room=request.sid,
-        )
-    except Exception as e:
-        print("ERROR getting MIDI status:", e)
-        socket.emit("midi_error", {"message": str(e)}, namespace="/", room=request.sid)
-
-
-@socket.on("scan_folder_MIDI")
-def midi_scan(data):
-    try:
-        handle_scan(data, socket, connected_sids)
-    except Exception as e:
-        print("ERROR in midi_scan handler:", e)
-
-        socket.emit(
-            "directory_tree_error", {"message": str(e)}, namespace="/", room=request.sid
-        )
-
-
-# USB
-@socket.on("request_tree")
-def handle_request_tree():
-    sid = request.sid
-
-    send_last_tree(socket, sid)
+    MIDI()
 
 
 if __name__ == "__main__":
-
+    print("Starting app.py")
     hc_thread = threading.Thread(target=run, args=(socket, next_step, previoust_step))
     hc_thread.daemon = True
     hc_thread.start()
+    print("hc thread should be running")
 
-    usb_thread = threading.Thread(
-        target=usb_monitor, args=(socket, connected_sids, app)
-    )
-    usb_thread.daemon = True
-    usb_thread.start()
-
-    print("hc and USB threads running")
-
-    print("hc and USB threads running")
     socket.run(
         app,
         host="0.0.0.0",
@@ -705,3 +431,4 @@ if __name__ == "__main__":
         use_reloader=False,
         allow_unsafe_werkzeug=True,
     )
+    # socket.run(app, host="0.0.0.0", port=2137, debug=True)

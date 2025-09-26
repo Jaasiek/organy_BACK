@@ -5,7 +5,7 @@ import mido
 from gpio import disable_keyboard
 
 # === KONFIG ===
-SERIAL_DEV = "/dev/pts/2"
+SERIAL_DEV = "/dev/serial0"
 # albo /dev/ttyAMA0 w zależności od RPi
 BAUD = 31250
 

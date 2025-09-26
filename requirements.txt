@@ -1,0 +1,7 @@
+flask
+flask-socketio
+pigpio
+flask-cors
+mido
+pyudev
+sudo visudo = pi ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount, /sbin/shutdown
