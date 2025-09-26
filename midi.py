@@ -5,7 +5,7 @@ import mido
 from gpio import disable_keyboard
 
 # === KONFIG ===
-SERIAL_DEV = "/dev/serial0"
+SERIAL_DEV = "/dev/pts/2"
 # albo /dev/ttyAMA0 w zależności od RPi
 BAUD = 31250
 
@@ -90,7 +90,7 @@ def msg_to_bytes(msg):
 
 class MidiPlayer:
     def __init__(
-        self, file_path, serial_dev="/dev/pts/2", baud=31250, channel_map=channel_map
+        self, file_path, serial_dev=SERIAL_DEV, baud=BAUD, channel_map=channel_map
     ):
         self.file_path = file_path
         self.serial_dev = serial_dev
