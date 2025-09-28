@@ -4,6 +4,13 @@ pigpio
 flask-cors
 mido
 pyudev
-serial
-sudo visudo = pi ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/mount, /usr/bin/umount, /sbin/shutdown
+pyserial
 
+COMMAND TO EXECUTE ON RASPBERRY PI
+sudo visudo = pi ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/mount, /usr/bin/umount, /sbin/shutdown
+sudo mkdir /mnt/usb
+
+
+for spying midi without serial port connection use (fictitious serial port):
+    stdbuf -o0 cat /dev/pts/3 | hexdump -C
+    only when /dev/pts/2 is set as SERIAL_DEV in midi.py
